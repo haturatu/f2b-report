@@ -1,0 +1,9 @@
+# Go build outputs
+f2b-report
+*.exe
+*.out
+
+# Generated reports
+report.html
+test.html
+*.html

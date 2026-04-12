@@ -3,7 +3,6 @@ module fail2ban-report
 go 1.26
 
 require (
-	github.com/abh/geoip v0.0.0-20160510155516-07cea4480daa
 	github.com/openrdap/rdap v0.9.1
 	github.com/oschwald/geoip2-golang v1.13.0
 )

@@ -3,7 +3,9 @@
 
 `f2b-report` reads `fail2ban-client status <jail>` output from stdin and writes a simple HTML report to stdout.
 
-If MaxMind GeoIP databases, legacy `GeoIP.dat`, or RDAP are available, it also enriches each IP with country and network metadata and builds a country summary. The output is intentionally minimal and text-site-like.
+If MaxMind GeoIP databases or RDAP are available, it enriches each IP with country and network metadata and builds a country summary. The output is intentionally minimal and text-site-like.
+
+Legacy `GeoIP.dat` support is optional and disabled in the default build because it depends on `cgo` and `libGeoIP`.
 
 ## Install
 
@@ -62,7 +64,7 @@ The generated HTML can include:
 - currently banned / total banned
 - banned IP list
 - country data from a local MaxMind country database
-- country data from legacy `GeoIP.dat` when available
+- country data from legacy `GeoIP.dat` when built with `-tags legacygeoip`
 - country totals and percentages
 - a lightweight inline SVG bar chart
 - ASN / organization from a local MaxMind ASN database
@@ -80,7 +82,7 @@ Optional:
 
 - `GeoLite2-Country.mmdb` or `GeoIP2-Country.mmdb`
 - `GeoLite2-ASN.mmdb` or `GeoIP2-ASN.mmdb`
-- `GeoIP.dat` for legacy IPv4 country lookup
+- `GeoIP.dat` for optional legacy IPv4 country lookup
 - outbound network access for RDAP
 
 The report still renders if these data sources are unavailable. Missing lookup fields are shown as `n/a`.
@@ -96,6 +98,7 @@ The report still renders if these data sources are unavailable. Missing lookup f
   - path to a MaxMind ASN database
 - `-legacy-country-db`
   - path to legacy `GeoIP.dat`
+  - only works in builds compiled with `-tags legacygeoip`
 - `-rdap`
   - enable or disable RDAP lookups
   - default: `true`
@@ -106,6 +109,17 @@ The report still renders if these data sources are unavailable. Missing lookup f
 - lookup failures are tolerated; one failed lookup does not stop the whole report
 - country and ASN data depend on the local MaxMind database contents
 - legacy `GeoIP.dat` lookup is IPv4 only and returns country codes
+- the default build does not require `libGeoIP` and should build on FreeBSD
+
+## Optional Legacy GeoIP Build
+
+If you explicitly want legacy `GeoIP.dat` support, build with:
+
+```bash
+go build -tags legacygeoip -o f2b-report .
+```
+
+This requires `cgo` and `libGeoIP`.
 - duplicate IPs in the input are deduplicated before reporting
 
 ## Development

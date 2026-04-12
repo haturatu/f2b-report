@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/abh/geoip"
 	"github.com/openrdap/rdap"
 	"github.com/oschwald/geoip2-golang"
 )
@@ -62,7 +61,7 @@ type enrichConfig struct {
 type enrichers struct {
 	countryReader *geoip2.Reader
 	asnReader     *geoip2.Reader
-	legacyCountry *geoip.GeoIP
+	legacyCountry legacyCountryLookup
 	rdapClient    *rdap.Client
 }
 
@@ -335,7 +334,7 @@ func newEnrichers(cfg enrichConfig) (*enrichers, error) {
 		}
 	}
 	if cfg.LegacyIPv4DB != "" {
-		legacyReader, err := geoip.Open(cfg.LegacyIPv4DB, "")
+		legacyReader, err := openLegacyCountryLookup(cfg.LegacyIPv4DB)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("legacy country db: %v", err))
 		} else {
@@ -366,7 +365,7 @@ func (e *enrichers) close() {
 	}
 }
 
-func countryLookup(reader *geoip2.Reader, legacy *geoip.GeoIP, ipStr string) string {
+func countryLookup(reader *geoip2.Reader, legacy legacyCountryLookup, ipStr string) string {
 	if reader == nil && legacy == nil {
 		return ""
 	}
@@ -376,7 +375,7 @@ func countryLookup(reader *geoip2.Reader, legacy *geoip.GeoIP, ipStr string) str
 		}
 	}
 	if legacy != nil {
-		return countryLookupLegacy(legacy, ipStr)
+		return cleanValue(legacy.LookupCountry(ipStr))
 	}
 	return ""
 }
@@ -400,18 +399,6 @@ func countryLookupMMDB(reader *geoip2.Reader, ipStr string) string {
 	default:
 		return code
 	}
-}
-
-func countryLookupLegacy(reader *geoip.GeoIP, ipStr string) string {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return ""
-	}
-	if ip.To4() == nil {
-		return ""
-	}
-	cc, _ := reader.GetCountry(ipStr)
-	return cleanValue(cc)
 }
 
 func asnLookup(reader *geoip2.Reader, ipStr string) (asn, org string) {

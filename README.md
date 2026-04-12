@@ -1,4 +1,5 @@
 # f2b-report
+<img width="1005" height="598" alt="image" src="https://github.com/user-attachments/assets/74730ed3-a581-4f48-abfd-b9c4856be801" />
 
 `f2b-report` reads `fail2ban-client status <jail>` output from stdin and writes a simple HTML report to stdout.
 

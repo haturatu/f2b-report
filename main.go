@@ -10,14 +10,19 @@ import (
 	"html/template"
 	"io"
 	"net"
+	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/abh/geoip"
+	"github.com/openrdap/rdap"
+	"github.com/oschwald/geoip2-golang"
 )
 
 type reportData struct {
@@ -47,13 +52,30 @@ type countryStat struct {
 	Percent string
 }
 
+type enrichConfig struct {
+	CountryDBPath string
+	ASNDBPath     string
+	LegacyIPv4DB  string
+	EnableRDAP    bool
+}
+
+type enrichers struct {
+	countryReader *geoip2.Reader
+	asnReader     *geoip2.Reader
+	legacyCountry *geoip.GeoIP
+	rdapClient    *rdap.Client
+}
+
 var (
 	reDigits = regexp.MustCompile(`\d+`)
-	reCIDR   = regexp.MustCompile(`(?i)\broute:\s*([0-9./:]+)|\broute6:\s*([0-9./:]+)|\bcidr:\s*([0-9./:]+)|\binetnum:\s*([0-9./:]+ - [0-9./:]+)|\bnetrange:\s*([0-9./:]+ - [0-9./:]+)`)
 )
 
 func main() {
 	concurrency := flag.Int("concurrency", 8, "max concurrent IP enrichments")
+	countryDB := flag.String("country-db", "", "path to GeoLite2/GeoIP2 country mmdb")
+	asnDB := flag.String("asn-db", "", "path to GeoLite2/GeoIP2 ASN mmdb")
+	legacyCountryDB := flag.String("legacy-country-db", "", "path to legacy GeoIP.dat country db")
+	enableRDAP := flag.Bool("rdap", true, "enable RDAP lookups for network metadata")
 	flag.Parse()
 
 	raw, err := io.ReadAll(os.Stdin)
@@ -69,7 +91,24 @@ func main() {
 		exitf("failed to parse fail2ban status: %v", err)
 	}
 
-	annotateIPs(&data, *concurrency)
+	cfg := enrichConfig{
+		CountryDBPath: resolveDBPath(*countryDB, "F2B_COUNTRY_DB", []string{
+			"/usr/share/GeoIP/GeoLite2-Country.mmdb",
+			"/usr/local/share/GeoIP/GeoLite2-Country.mmdb",
+			"/var/lib/GeoIP/GeoLite2-Country.mmdb",
+		}),
+		ASNDBPath: resolveDBPath(*asnDB, "F2B_ASN_DB", []string{
+			"/usr/share/GeoIP/GeoLite2-ASN.mmdb",
+			"/usr/local/share/GeoIP/GeoLite2-ASN.mmdb",
+			"/var/lib/GeoIP/GeoLite2-ASN.mmdb",
+		}),
+		LegacyIPv4DB: resolveDBPath(*legacyCountryDB, "F2B_LEGACY_COUNTRY_DB", []string{
+			"/usr/share/GeoIP/GeoIP.dat",
+		}),
+		EnableRDAP: *enableRDAP,
+	}
+
+	annotateIPs(&data, *concurrency, cfg)
 	data.Countries = summarizeCountries(data.IPs)
 	data.CountryChart = renderCountryChart(data.Countries)
 	data.GeneratedAt = time.Now().Format(time.RFC3339)
@@ -181,10 +220,37 @@ func compareIP(a, b string) int {
 	return bytes.Compare(ab, bb)
 }
 
-func annotateIPs(data *reportData, concurrency int) {
-	hasGeo := commandExists("geoiplookup")
-	hasWhois := commandExists("whois")
-	if !hasGeo && !hasWhois {
+func resolveDBPath(flagValue, envName string, defaults []string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if envValue := strings.TrimSpace(os.Getenv(envName)); envValue != "" {
+		return envValue
+	}
+	for _, candidate := range defaults {
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Clean(path))
+	return err == nil && !info.IsDir()
+}
+
+func annotateIPs(data *reportData, concurrency int, cfg enrichConfig) {
+	enrich, err := newEnrichers(cfg)
+	if err != nil {
+		return
+	}
+	defer enrich.close()
+
+	if enrich.countryReader == nil && enrich.asnReader == nil && enrich.legacyCountry == nil && enrich.rdapClient == nil {
 		return
 	}
 	if concurrency < 1 {
@@ -203,18 +269,37 @@ func annotateIPs(data *reportData, concurrency int) {
 
 			rec := data.IPs[idx]
 			var innerWG sync.WaitGroup
-			if hasGeo {
+			if enrich.countryReader != nil || enrich.legacyCountry != nil {
 				innerWG.Add(1)
 				go func() {
 					defer innerWG.Done()
-					rec.Country = geoLookup(rec.Address)
+					rec.Country = countryLookup(enrich.countryReader, enrich.legacyCountry, rec.Address)
 				}()
 			}
-			if hasWhois {
+			if enrich.asnReader != nil {
 				innerWG.Add(1)
 				go func() {
 					defer innerWG.Done()
-					rec.ASN, rec.NetName, rec.Org = whoisLookup(rec.Address)
+					rec.ASN, rec.Org = asnLookup(enrich.asnReader, rec.Address)
+				}()
+			}
+			if enrich.rdapClient != nil {
+				innerWG.Add(1)
+				go func() {
+					defer innerWG.Done()
+					rdapCountry, rdapASN, rdapNet, rdapOrg := rdapLookup(enrich.rdapClient, rec.Address)
+					if rec.Country == "" {
+						rec.Country = rdapCountry
+					}
+					if rec.ASN == "" {
+						rec.ASN = rdapASN
+					}
+					if rec.NetName == "" {
+						rec.NetName = rdapNet
+					}
+					if rec.Org == "" {
+						rec.Org = rdapOrg
+					}
 				}()
 			}
 			innerWG.Wait()
@@ -229,28 +314,119 @@ func annotateIPs(data *reportData, concurrency int) {
 	wg.Wait()
 }
 
-func commandExists(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
+func newEnrichers(cfg enrichConfig) (*enrichers, error) {
+	e := &enrichers{}
+	var errs []string
+
+	if cfg.CountryDBPath != "" {
+		reader, err := geoip2.Open(cfg.CountryDBPath)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("country db: %v", err))
+		} else {
+			e.countryReader = reader
+		}
+	}
+	if cfg.ASNDBPath != "" {
+		reader, err := geoip2.Open(cfg.ASNDBPath)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("asn db: %v", err))
+		} else {
+			e.asnReader = reader
+		}
+	}
+	if cfg.LegacyIPv4DB != "" {
+		legacyReader, err := geoip.Open(cfg.LegacyIPv4DB, "")
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("legacy country db: %v", err))
+		} else {
+			e.legacyCountry = legacyReader
+		}
+	}
+	if cfg.EnableRDAP {
+		e.rdapClient = &rdap.Client{
+			HTTP: &http.Client{Timeout: 5 * time.Second},
+		}
+	}
+
+	if len(errs) > 0 && e.countryReader == nil && e.asnReader == nil && e.legacyCountry == nil && e.rdapClient == nil {
+		return nil, errors.New(strings.Join(errs, "; "))
+	}
+	return e, nil
 }
 
-func geoLookup(ip string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "geoiplookup", ip).CombinedOutput()
-	if err != nil {
+func (e *enrichers) close() {
+	if e == nil {
+		return
+	}
+	if e.countryReader != nil {
+		_ = e.countryReader.Close()
+	}
+	if e.asnReader != nil {
+		_ = e.asnReader.Close()
+	}
+}
+
+func countryLookup(reader *geoip2.Reader, legacy *geoip.GeoIP, ipStr string) string {
+	if reader == nil && legacy == nil {
 		return ""
 	}
-	line := strings.TrimSpace(string(out))
-	if idx := strings.Index(line, ":"); idx >= 0 {
-		line = strings.TrimSpace(line[idx+1:])
+	if reader != nil {
+		if value := countryLookupMMDB(reader, ipStr); value != "" {
+			return value
+		}
 	}
-	line = strings.TrimPrefix(line, "GeoIP Country Edition:")
-	line = strings.TrimSpace(line)
-	if strings.HasPrefix(strings.ToUpper(line), "IP ADDRESS NOT FOUND") {
+	if legacy != nil {
+		return countryLookupLegacy(legacy, ipStr)
+	}
+	return ""
+}
+
+func countryLookupMMDB(reader *geoip2.Reader, ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
 		return ""
 	}
-	return line
+	record, err := reader.Country(ip)
+	if err != nil || record == nil {
+		return ""
+	}
+	name := cleanValue(record.Country.Names["en"])
+	code := cleanValue(record.Country.IsoCode)
+	switch {
+	case code != "" && name != "":
+		return code + ", " + name
+	case name != "":
+		return name
+	default:
+		return code
+	}
+}
+
+func countryLookupLegacy(reader *geoip.GeoIP, ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ""
+	}
+	if ip.To4() == nil {
+		return ""
+	}
+	cc, _ := reader.GetCountry(ipStr)
+	return cleanValue(cc)
+}
+
+func asnLookup(reader *geoip2.Reader, ipStr string) (asn, org string) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", ""
+	}
+	record, err := reader.ASN(ip)
+	if err != nil || record == nil {
+		return "", ""
+	}
+	if record.AutonomousSystemNumber > 0 {
+		asn = fmt.Sprintf("AS%d", record.AutonomousSystemNumber)
+	}
+	return asn, cleanValue(record.AutonomousSystemOrganization)
 }
 
 func summarizeCountries(ips []ipRecord) []countryStat {
@@ -338,87 +514,78 @@ func renderCountryChart(stats []countryStat) template.HTML {
 	return template.HTML(b.String())
 }
 
-func whoisLookup(ip string) (asn, netname, org string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+func rdapLookup(client *rdap.Client, ip string) (country, asn, netname, org string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "whois", ip).CombinedOutput()
+	req := (&rdap.Request{
+		Type:    rdap.IPRequest,
+		Query:   ip,
+		Timeout: 5 * time.Second,
+	}).WithContext(ctx)
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", ""
+		return "", "", "", ""
+	}
+	network, ok := resp.Object.(*rdap.IPNetwork)
+	if !ok || network == nil {
+		return "", "", "", ""
 	}
 
-	lines := splitLines(string(out))
-	for _, line := range lines {
-		key, value, ok := splitField(line)
-		if !ok {
-			continue
-		}
-		switch strings.ToLower(key) {
-		case "origin", "originas", "aut-num":
-			if asn == "" {
-				asn = value
-			}
-		case "netname":
-			if netname == "" {
-				netname = value
-			}
-		case "orgname", "org-name", "org", "organisation", "organization", "owner", "descr":
-			if org == "" {
-				org = value
-			}
-		}
-	}
-
-	if asn == "" {
-		asn = firstASN(string(out))
-	}
+	country = cleanValue(network.Country)
+	netname = cleanValue(network.Name)
 	if netname == "" {
-		netname = firstCIDR(string(out))
+		netname = ipRange(network.StartAddress, network.EndAddress)
 	}
-	return cleanValue(asn), cleanValue(netname), cleanValue(org)
+	org = entityName(network.Entities)
+	asn = autnumHandle(network.Entities)
+	return country, asn, netname, org
 }
 
-func splitField(line string) (key, value string, ok bool) {
-	if strings.HasPrefix(strings.TrimSpace(line), "%") || strings.HasPrefix(strings.TrimSpace(line), "#") {
-		return "", "", false
-	}
-	idx := strings.Index(line, ":")
-	if idx < 0 {
-		return "", "", false
-	}
-	key = strings.TrimSpace(line[:idx])
-	value = strings.TrimSpace(line[idx+1:])
-	if key == "" || value == "" {
-		return "", "", false
-	}
-	return key, value, true
-}
-
-func firstASN(s string) string {
-	for _, line := range splitLines(s) {
-		upper := strings.ToUpper(strings.TrimSpace(line))
-		idx := strings.Index(upper, "AS")
-		if idx < 0 {
-			continue
+func autnumHandle(entities []rdap.Entity) string {
+	for _, entity := range entities {
+		for _, autnum := range entity.Autnums {
+			if value := cleanValue(autnum.Handle); value != "" {
+				return value
+			}
+			if autnum.StartAutnum != nil && *autnum.StartAutnum > 0 {
+				return fmt.Sprintf("AS%d", *autnum.StartAutnum)
+			}
 		}
-		word := strings.Fields(upper[idx:])
-		if len(word) > 0 && strings.HasPrefix(word[0], "AS") {
-			return word[0]
+		if value := autnumHandle(entity.Entities); value != "" {
+			return value
 		}
 	}
 	return ""
 }
 
-func firstCIDR(s string) string {
-	match := reCIDR.FindStringSubmatch(s)
-	if len(match) < 2 {
-		return ""
-	}
-	for _, part := range match[1:] {
-		if strings.TrimSpace(part) != "" {
-			return strings.TrimSpace(part)
+func entityName(entities []rdap.Entity) string {
+	for _, entity := range entities {
+		if entity.VCard != nil {
+			if value := cleanValue(entity.VCard.Name()); value != "" {
+				return value
+			}
+		}
+		if value := cleanValue(entity.Handle); value != "" {
+			return value
+		}
+		if value := entityName(entity.Entities); value != "" {
+			return value
 		}
 	}
 	return ""
+}
+
+func ipRange(start, end string) string {
+	start = cleanValue(start)
+	end = cleanValue(end)
+	if start == "" {
+		return end
+	}
+	if end == "" || end == start {
+		return start
+	}
+	return start + " - " + end
 }
 
 func cleanValue(s string) string {
@@ -528,6 +695,6 @@ lookup_data: {{if .HasLookupData}}enabled{{else}}none{{end}}</pre>
     </tbody>
   </table>
 
-  <p class="muted">missing lookup results are rendered as n/a. geo source: <code>geoiplookup</code>. network source: <code>whois</code>.</p>
+  <p class="muted">missing lookup results are rendered as n/a. geo source: local MaxMind mmdb. network source: RDAP.</p>
 </body>
 </html>`))

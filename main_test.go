@@ -2,22 +2,12 @@ package main
 
 import "testing"
 
-func TestFirstCIDRNoMatch(t *testing.T) {
-	if got := firstCIDR("no cidr or route fields here"); got != "" {
-		t.Fatalf("expected empty result, got %q", got)
-	}
-}
-
-func TestFirstCIDRMatch(t *testing.T) {
-	input := "inetnum: 203.0.113.0 - 203.0.113.255\nnetname: EXAMPLE-NET"
-	if got := firstCIDR(input); got != "203.0.113.0 - 203.0.113.255" {
-		t.Fatalf("unexpected cidr/range: %q", got)
-	}
-}
-
 func TestNormalizeCountry(t *testing.T) {
 	if got := normalizeCountry("KR, Republic of Korea"); got != "Republic of Korea" {
 		t.Fatalf("unexpected country: %q", got)
+	}
+	if got := normalizeCountry("KR"); got != "KR" {
+		t.Fatalf("unexpected legacy country code: %q", got)
 	}
 }
 
@@ -41,5 +31,11 @@ func TestSummarizeCountries(t *testing.T) {
 	}
 	if stats[2].Name != "Unknown" || stats[2].Count != 1 {
 		t.Fatalf("unexpected unknown country: %+v", stats[2])
+	}
+}
+
+func TestIPRange(t *testing.T) {
+	if got := ipRange("203.0.113.0", "203.0.113.255"); got != "203.0.113.0 - 203.0.113.255" {
+		t.Fatalf("unexpected range: %q", got)
 	}
 }

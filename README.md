@@ -2,7 +2,7 @@
 
 `f2b-report` reads `fail2ban-client status <jail>` output from stdin and writes a simple HTML report to stdout.
 
-If `geoiplookup` and `whois` are available, it also enriches each IP with country and network metadata and builds a country summary. The output is intentionally minimal and text-site-like.
+If MaxMind GeoIP databases, legacy `GeoIP.dat`, or RDAP are available, it also enriches each IP with country and network metadata and builds a country summary. The output is intentionally minimal and text-site-like.
 
 ## Install
 
@@ -60,10 +60,12 @@ The generated HTML can include:
 - currently failed / total failed
 - currently banned / total banned
 - banned IP list
-- country data from `geoiplookup`
+- country data from a local MaxMind country database
+- country data from legacy `GeoIP.dat` when available
 - country totals and percentages
 - a lightweight inline SVG bar chart
-- ASN / netname / organization from `whois`
+- ASN / organization from a local MaxMind ASN database
+- netname / organization / fallback country data from RDAP
 
 The chart is embedded directly in the HTML. No separate image file is generated.
 
@@ -75,22 +77,34 @@ Required:
 
 Optional:
 
-- `geoiplookup`
-- `whois`
+- `GeoLite2-Country.mmdb` or `GeoIP2-Country.mmdb`
+- `GeoLite2-ASN.mmdb` or `GeoIP2-ASN.mmdb`
+- `GeoIP.dat` for legacy IPv4 country lookup
+- outbound network access for RDAP
 
-The report still renders if these commands are missing. Unavailable lookup fields are shown as `n/a`.
+The report still renders if these data sources are unavailable. Missing lookup fields are shown as `n/a`.
 
 ## Flags
 
 - `-concurrency`
   - maximum number of concurrent IP enrichment workers
   - default: `8`
+- `-country-db`
+  - path to a MaxMind country database
+- `-asn-db`
+  - path to a MaxMind ASN database
+- `-legacy-country-db`
+  - path to legacy `GeoIP.dat`
+- `-rdap`
+  - enable or disable RDAP lookups
+  - default: `true`
 
 ## Notes
 
-- `whois` can be slow depending on the remote server and network conditions
+- RDAP can be slow depending on the remote registry and network conditions
 - lookup failures are tolerated; one failed lookup does not stop the whole report
-- `geoiplookup` country names depend on the local GeoIP database
+- country and ASN data depend on the local MaxMind database contents
+- legacy `GeoIP.dat` lookup is IPv4 only and returns country codes
 - duplicate IPs in the input are deduplicated before reporting
 
 ## Development

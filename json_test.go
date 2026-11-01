@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+func TestIncompleteSnapshotCannotDeactivateRemoteBans(t *testing.T) {
+	if _, err := makeSnapshot(reportData{Jail: "sshd", GeneratedAt: "2026-11-01T11:00:00Z", CurrentlyBanned: 2}, "oci"); err == nil {
+		t.Fatal("a truncated IP list must not become an empty remote snapshot")
+	}
+	if _, err := parseStatus("Status for the jail: sshd\n"); err == nil {
+		t.Fatal("missing action status must not become a zero-ban report")
+	}
+}
+
 func TestSnapshotNormalizesMetadataAndAddresses(t *testing.T) {
 	data := reportData{Jail: "sshd", GeneratedAt: "2026-11-01T20:00:00+09:00", CurrentlyBanned: 3, IPs: []ipRecord{
 		{Address: "::ffff:1.1.1.1", Country: "AU, Australia", ASN: "AS13335", Org: "Cloudflare"},

@@ -145,6 +145,7 @@ func main() {
 
 func parseStatus(input string) (reportData, error) {
 	var data reportData
+	var hasCurrentCount, hasBannedList bool
 	lines := splitLines(input)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -156,10 +157,12 @@ func parseStatus(input string) (reportData, error) {
 		case strings.Contains(trimmed, "Total failed:"):
 			data.TotalFailed = extractInt(trimmed)
 		case strings.Contains(trimmed, "Currently banned:"):
+			hasCurrentCount = true
 			data.CurrentlyBanned = extractInt(trimmed)
 		case strings.Contains(trimmed, "Total banned:"):
 			data.TotalBanned = extractInt(trimmed)
 		case strings.Contains(trimmed, "Banned IP list:"):
+			hasBannedList = true
 			rest := strings.TrimSpace(strings.SplitN(trimmed, "Banned IP list:", 2)[1])
 			data.IPs = append(data.IPs, parseIPs(rest)...)
 		default:
@@ -172,6 +175,9 @@ func parseStatus(input string) (reportData, error) {
 	data.IPs = uniqueAndSortIPs(data.IPs)
 	if data.Jail == "" {
 		return data, errors.New("missing jail name")
+	}
+	if !hasCurrentCount || !hasBannedList {
+		return data, errors.New("incomplete ban status")
 	}
 	return data, nil
 }

@@ -42,6 +42,9 @@ func nonempty(value string) *string {
 }
 
 func makeSnapshot(data reportData, source string) (snapshot, error) {
+	if data.CurrentlyBanned != len(data.IPs) {
+		return snapshot{}, fmt.Errorf("ban count and parsed IP count disagree; refusing an incomplete snapshot")
+	}
 	observed, err := time.Parse(time.RFC3339, data.GeneratedAt)
 	if err != nil {
 		return snapshot{}, err

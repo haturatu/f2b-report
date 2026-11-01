@@ -135,3 +135,17 @@ Try the bundled sample input:
 ```bash
 GOCACHE=/tmp/go-build-cache go run . < sample.txt > /tmp/f2b-report.html
 ```
+
+## JSON snapshot export
+
+The default stdout output remains HTML. To write a versioned JSON snapshot during the same parse and enrichment pass, supply a public source label and a destination outside the HTML/Git directory:
+
+```sh
+fail2ban-client status sshd | ./f2b-report \
+  --source example \
+  --json-output /var/lib/f2b-api/reports/sshd.json > sshd-report.html
+```
+
+For JSON on stdout, use `--format json --source example`. The snapshot contains `schema_version`, `source`, `jail`, UTC `observed_at`, Fail2ban counters, and an `ips` array with canonical IPs, ISO country codes, numeric ASNs, organization and network names. Missing metadata is `null`; a jail with no bans exports an empty array. IPv4-mapped IPv6 is normalized to IPv4.
+
+`--json-output` replaces the destination atomically with mode `0600`. Use a protected destination directory. The collector filters non-public addresses before uploading; the exporter preserves the status input. Collection timestamps describe observations and do not reconstruct historical BAN events between scheduled runs.

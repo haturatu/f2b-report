@@ -75,7 +75,16 @@ func main() {
 	asnDB := flag.String("asn-db", "", "path to GeoLite2/GeoIP2 ASN mmdb")
 	legacyCountryDB := flag.String("legacy-country-db", "", "path to legacy GeoIP.dat country db")
 	enableRDAP := flag.Bool("rdap", true, "enable RDAP lookups for network metadata")
+	format := flag.String("format", "html", "stdout format: html or json")
+	jsonOutput := flag.String("json-output", "", "also atomically write a machine-readable JSON snapshot")
+	source := flag.String("source", "", "public collection source label (required for JSON)")
 	flag.Parse()
+	if *format != "html" && *format != "json" {
+		exitf("format must be html or json")
+	}
+	if (*format == "json" || *jsonOutput != "") && !validSource.MatchString(*source) {
+		exitf("JSON requires a source label of 1-64 lowercase letters, digits, underscores or hyphens")
+	}
 
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -111,6 +120,23 @@ func main() {
 	data.Countries = summarizeCountries(data.IPs)
 	data.CountryChart = renderCountryChart(data.Countries)
 	data.GeneratedAt = time.Now().Format(time.RFC3339)
+	if *jsonOutput != "" || *format == "json" {
+		snapshot, err := makeSnapshot(data, *source)
+		if err != nil {
+			exitf("failed to create JSON snapshot: %v", err)
+		}
+		if *jsonOutput != "" {
+			if err := writeSnapshot(*jsonOutput, snapshot); err != nil {
+				exitf("failed to write JSON snapshot: %v", err)
+			}
+		}
+		if *format == "json" {
+			if err := encodeSnapshot(os.Stdout, snapshot); err != nil {
+				exitf("failed to render JSON: %v", err)
+			}
+			return
+		}
+	}
 
 	if err := pageTemplate.Execute(os.Stdout, data); err != nil {
 		exitf("failed to render html: %v", err)
@@ -264,41 +290,27 @@ func annotateIPs(data *reportData, concurrency int, cfg enrichConfig) {
 			defer func() { <-sem }()
 
 			rec := data.IPs[idx]
-			var innerWG sync.WaitGroup
 			if enrich.countryReader != nil || enrich.legacyCountry != nil {
-				innerWG.Add(1)
-				go func() {
-					defer innerWG.Done()
-					rec.Country = countryLookup(enrich.countryReader, enrich.legacyCountry, rec.Address)
-				}()
+				rec.Country = countryLookup(enrich.countryReader, enrich.legacyCountry, rec.Address)
 			}
 			if enrich.asnReader != nil {
-				innerWG.Add(1)
-				go func() {
-					defer innerWG.Done()
-					rec.ASN, rec.Org = asnLookup(enrich.asnReader, rec.Address)
-				}()
+				rec.ASN, rec.Org = asnLookup(enrich.asnReader, rec.Address)
 			}
 			if enrich.rdapClient != nil {
-				innerWG.Add(1)
-				go func() {
-					defer innerWG.Done()
-					rdapCountry, rdapASN, rdapNet, rdapOrg := rdapLookup(enrich.rdapClient, rec.Address)
-					if rec.Country == "" {
-						rec.Country = rdapCountry
-					}
-					if rec.ASN == "" {
-						rec.ASN = rdapASN
-					}
-					if rec.NetName == "" {
-						rec.NetName = rdapNet
-					}
-					if rec.Org == "" {
-						rec.Org = rdapOrg
-					}
-				}()
+				rdapCountry, rdapASN, rdapNet, rdapOrg := rdapLookup(enrich.rdapClient, rec.Address)
+				if rec.Country == "" {
+					rec.Country = rdapCountry
+				}
+				if rec.ASN == "" {
+					rec.ASN = rdapASN
+				}
+				if rec.NetName == "" {
+					rec.NetName = rdapNet
+				}
+				if rec.Org == "" {
+					rec.Org = rdapOrg
+				}
 			}
-			innerWG.Wait()
 			mu.Lock()
 			if rec.Country != "" || rec.ASN != "" || rec.NetName != "" || rec.Org != "" {
 				data.HasLookupData = true

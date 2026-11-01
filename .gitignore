@@ -7,3 +7,7 @@ f2b-report
 report.html
 test.html
 *.html
+
+# Private build and export artifacts
+.private/
+*.json

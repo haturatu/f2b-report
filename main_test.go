@@ -1,6 +1,30 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestReportWithNoBannedIPs(t *testing.T) {
+	status := "Status for the jail: recidive\n" +
+		"|- Filter\n|  |- Currently failed: 0\n|  `- Total failed: 254\n" +
+		"`- Actions\n   |- Currently banned: 0\n   |- Total banned: 20\n   `- Banned IP list:\n"
+	data, err := parseStatus(status)
+	if err != nil {
+		t.Fatalf("zero bans should produce a current report: %v", err)
+	}
+	if data.Jail != "recidive" || data.CurrentlyBanned != 0 || data.TotalBanned != 20 || len(data.IPs) != 0 {
+		t.Fatalf("unexpected empty jail report: %+v", data)
+	}
+	var html bytes.Buffer
+	if err := pageTemplate.Execute(&html, data); err != nil {
+		t.Fatalf("render empty jail: %v", err)
+	}
+	if !strings.Contains(html.String(), "fail2ban report - recidive") || !strings.Contains(html.String(), "no country data") {
+		t.Fatal("empty jail report did not render")
+	}
+}
 
 func TestNormalizeCountry(t *testing.T) {
 	if got := normalizeCountry("KR, Republic of Korea"); got != "Republic of Korea" {

@@ -147,9 +147,6 @@ func parseStatus(input string) (reportData, error) {
 	if data.Jail == "" {
 		return data, errors.New("missing jail name")
 	}
-	if len(data.IPs) == 0 {
-		return data, errors.New("no banned IPs found")
-	}
 	return data, nil
 }
 
